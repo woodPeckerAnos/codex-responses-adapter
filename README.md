@@ -74,22 +74,6 @@ If `codex login status` is not authenticated, run:
 codex login
 ```
 
-### Local Codex 0.166+ install without sudo
-
-The global npm prefix `/usr/local` is often root-owned. This project can install the
-latest Codex CLI into its own `.tools/` directory instead:
-
-```bash
-cd codex-responses-adapter
-./scripts/install-codex-local.sh
-export PATH="$PWD/.tools/node_modules/.bin:$PATH"
-codex --version       # expect 0.166.0 or newer
-```
-
-`scripts/run-local.sh` also sets `CRA_CODEX_PATH` to this local binary automatically.
-The old global `/usr/local/bin/codex` is not modified. If you prefer a global upgrade,
-run the npm command with the permissions required by your npm prefix.
-
 Verified with Codex `0.166.0`: `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-astra`, and
 `gpt-6-sol` are accepted by the current ChatGPT account. Codex `0.155.1` does not know
 the 6.1 model IDs.
@@ -104,13 +88,7 @@ CRA_CODEX_MODEL=gpt-6.1-sol \
 CRA_DEFAULT_MODEL=gpt-6.1-sol \
 CRA_MODEL_CONTEXT_WINDOW=500000 \
 CRA_MODEL_MAX_OUTPUT_TOKENS=32768 \
-./scripts/run-local.sh
-```
-
-Or, if the `codex` on `PATH` is already 0.166+:
-
-```bash
-CRA_API_KEY=local-codex-key CRA_CODEX_MODEL=gpt-6.1-sol uv run codex-responses-adapter
+uv run codex-responses-adapter
 ```
 
 The default bind address is `127.0.0.1:8000`. Equivalent Uvicorn command:
@@ -426,14 +404,14 @@ If `CRA_API_KEY` is set, pass that value as the SDK's `api_key`.
 
 DSH routes custom providers through `dsh-llm-pi-ai`. Use the **Custom model API** form:
 
-1. Start the adapter with a local key and the upgraded local Codex:
+1. Start the adapter with the global Codex 0.166+:
    ```bash
    CRA_API_KEY=local-codex-key \
    CRA_CODEX_MODEL=gpt-6.1-sol \
    CRA_DEFAULT_MODEL=gpt-6.1-sol \
    CRA_MODEL_CONTEXT_WINDOW=500000 \
    CRA_MODEL_MAX_OUTPUT_TOKENS=32768 \
-   ./scripts/run-local.sh
+   uv run codex-responses-adapter
    ```
 2. In DSH open **Settings → Models → Add model provider**, switch to **Custom model API**,
    and fill:

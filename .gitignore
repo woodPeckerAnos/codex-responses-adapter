@@ -9,5 +9,3 @@ build/
 *.egg-info/
 .uv-cache/
 .uv-python/
-.tools/
-.npm-cache/
