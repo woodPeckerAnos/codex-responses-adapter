@@ -255,6 +255,18 @@ def test_models_endpoint_requires_auth_when_configured() -> None:
     assert authorized.status_code == 200
 
 
+def test_oversized_prompt_is_compacted_before_codex() -> None:
+    client, backend = client_for(max_prompt_chars=10_000)
+    response = client.post(
+        "/v1/responses",
+        json={"input": "x" * 30_000},
+    )
+    assert response.status_code == 200
+    sent_prompt = backend.calls[0]["prompt"]
+    assert len(sent_prompt) <= 10_000
+    assert "characters of older conversation omitted" in sent_prompt
+
+
 def test_timeout_non_streaming() -> None:
     client, _ = client_for(FakeBackend(delay=0.3), request_timeout=0.02)
     response = client.post("/v1/responses", json={"input": "Slow"})

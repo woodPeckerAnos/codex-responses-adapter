@@ -32,6 +32,7 @@ from .errors import (
     previous_response_not_found,
     thread_busy,
 )
+from .prompt_budget import fit_prompt
 from .protocol import ResponseBuilder
 from .schemas import PreparedRequest
 from .settings import Settings
@@ -151,7 +152,7 @@ class ResponsesService:
                 await self._populate_tool_builder(context, builder)
             else:
                 turn = await self._backend.stream_turn(
-                    prompt=context.prepared.prompt,
+                    prompt=self._fit_prompt(context.prepared.prompt, label="text"),
                     thread_id=context.thread_id,
                     signal=context.signal,
                 )
@@ -192,7 +193,7 @@ class ResponsesService:
                     yield outbound.encode()
             else:
                 turn = await self._backend.stream_turn(
-                    prompt=context.prepared.prompt,
+                    prompt=self._fit_prompt(context.prepared.prompt, label="text"),
                     thread_id=context.thread_id,
                     signal=context.signal,
                 )
@@ -237,7 +238,7 @@ class ResponsesService:
         prepared = context.prepared
         collected = await self._collect_turn(
             context,
-            prompt=build_tool_prompt(prepared),
+            prompt=self._fit_prompt(build_tool_prompt(prepared), label="tool"),
             output_schema=decision_schema(prepared),
         )
         thread_id = collected.thread_id or context.thread_id
@@ -301,6 +302,18 @@ class ResponsesService:
             )
         final_text = next((text for text in reversed(texts) if text.strip()), "")
         return CollectedTurn(thread_id=thread_id, final_text=final_text, usage=usage)
+
+    def _fit_prompt(self, prompt: str, *, label: str) -> str:
+        fitted = fit_prompt(prompt, self._settings.max_prompt_chars)
+        if len(fitted) != len(prompt):
+            logger.warning(
+                "Compacted %s prompt from %d to %d characters (limit %d)",
+                label,
+                len(prompt),
+                len(fitted),
+                self._settings.max_prompt_chars,
+            )
+        return fitted
 
     def _builder(self, context: TurnContext) -> ResponseBuilder:
         return ResponseBuilder(

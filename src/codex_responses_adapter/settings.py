@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     request_timeout: float = Field(default=300.0, gt=0)
     queue_timeout: float = Field(default=30.0, ge=0)
     max_concurrency: int = Field(default=2, ge=1)
+    max_prompt_chars: int = Field(default=1_000_000, ge=10_000, le=1_048_576)
 
     response_ttl: int = Field(default=86_400, ge=1)
     max_response_records: int = Field(default=1_000, ge=1)

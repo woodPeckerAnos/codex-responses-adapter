@@ -86,7 +86,7 @@ uv sync --dev
 CRA_API_KEY=local-codex-key \
 CRA_CODEX_MODEL=gpt-6.1-sol \
 CRA_DEFAULT_MODEL=gpt-6.1-sol \
-CRA_MODEL_CONTEXT_WINDOW=500000 \
+CRA_MODEL_CONTEXT_WINDOW=200000 \
 CRA_MODEL_MAX_OUTPUT_TOKENS=32768 \
 uv run codex-responses-adapter
 ```
@@ -180,6 +180,7 @@ All settings use the `CRA_` environment prefix and may be placed in `.env`.
 | `CRA_REQUEST_TIMEOUT` | `300` | Per-turn timeout in seconds |
 | `CRA_QUEUE_TIMEOUT` | `30` | Maximum wait for a concurrency slot |
 | `CRA_MAX_CONCURRENCY` | `2` | Maximum simultaneously running Codex turns |
+| `CRA_MAX_PROMPT_CHARS` | `1000000` | Hard prompt cap; older middle context is omitted above this |
 | `CRA_RESPONSE_TTL` | `86400` | Lifetime of in-memory `previous_response_id` mappings |
 | `CRA_MAX_RESPONSE_RECORDS` | `1000` | LRU cap for response mappings |
 | `CRA_STORE_BY_DEFAULT` | `true` | Default value of request `store` |
@@ -409,7 +410,7 @@ DSH routes custom providers through `dsh-llm-pi-ai`. Use the **Custom model API*
    CRA_API_KEY=local-codex-key \
    CRA_CODEX_MODEL=gpt-6.1-sol \
    CRA_DEFAULT_MODEL=gpt-6.1-sol \
-   CRA_MODEL_CONTEXT_WINDOW=500000 \
+   CRA_MODEL_CONTEXT_WINDOW=200000 \
    CRA_MODEL_MAX_OUTPUT_TOKENS=32768 \
    uv run codex-responses-adapter
    ```
@@ -424,7 +425,7 @@ DSH routes custom providers through `dsh-llm-pi-ai`. Use the **Custom model API*
 | API protocol | **OpenAI Responses** |
 | API key | `local-codex-key` (same as `CRA_API_KEY`) |
 | Model ID | `gpt-6.1-sol` (or `gpt-6-astra`) |
-| Context window | `500000` for `gpt-6.1-sol`; `272000` for `gpt-6-astra` |
+| Context window | `200000` (keeps DSH compaction below Codex's 1,048,576-character input cap) |
 | Max output tokens | `32768` (adjust to your needs) |
 | Input types | Text only |
 | Reasoning levels | Do not enable |
@@ -450,13 +451,27 @@ Alternatively, the active profile's `cordis.patch.yml` can contain:
         baseURL: http://127.0.0.1:8000/v1
         models:
           - id: gpt-6.1-sol
-            contextWindow: 500000
+            contextWindow: 200000
             maxTokens: 32768
 ```
 
 `apiKeyEnv` names an environment variable; it is not the key value. Export
 `CODEX_LOCAL_API_KEY=local-codex-key` in the Host environment, or store the key through
 the DSH Models page.
+
+### Codex input-character cap
+
+Codex app-server rejects a turn when the serialized input exceeds **1,048,576
+characters**, independently of the model's token context window. The adapter
+defaults `CRA_MAX_PROMPT_CHARS` to `1,000,000` and, when a prompt is larger,
+keeps the instructions and recent tail and removes the oldest middle context
+with a visible marker. This prevents a single oversized DSH session from turning
+into `Codex Exec exited with code 1`.
+
+For DSH, keep the model context window at `200000` even though GPT-6.1 supports
+a larger model context. This makes DSH compact before the Codex transport cap is
+reached. An already oversized session should be compacted (`/compact`) or
+restarted; truncation keeps it running but necessarily drops older context.
 
 ### DSH tool calls
 
