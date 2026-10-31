@@ -36,21 +36,18 @@ def build_tool_prompt(prepared: PreparedRequest) -> str:
 
 def decision_schema(prepared: PreparedRequest) -> dict[str, Any]:
     """JSON Schema passed to Codex via ``--output-schema``."""
-    tool_names = [tool.name for tool in prepared.tools]
-    name_schema: dict[str, Any] = {"type": "string"}
-    if tool_names:
-        name_schema["enum"] = tool_names
-
     action_properties: dict[str, Any] = {
         "type": {"type": "string", "enum": ["message", "tool_call"]},
         "text": {"type": "string"},
-        "name": name_schema,
-        "arguments": {"type": "object"},
+        "name": {"type": "string"},
+        # Codex's strict output schema cannot describe arbitrary tool-argument
+        # properties. The model therefore returns a JSON-encoded object here.
+        "arguments": {"type": "string"},
     }
     action_schema: dict[str, Any] = {
         "type": "object",
         "properties": action_properties,
-        "required": ["type"],
+        "required": ["type", "text", "name", "arguments"],
         "additionalProperties": False,
     }
     actions_schema: dict[str, Any] = {
@@ -186,14 +183,16 @@ Available tools:
 
 {tools_text}
 
-Return exactly one JSON object and no surrounding prose:
-{{"actions":[{{"type":"message","text":"..."}}]}}
-or
-{{"actions":[{{"type":"tool_call","name":"TOOL_NAME","arguments":{{...}}}}]}}
+Return exactly one JSON object and no surrounding prose. Every action must include all four
+keys: `type`, `text`, `name`, and `arguments`. Use empty strings and `{{}}` for unused fields.
+For a normal message:
+{{"actions":[{{"type":"message","text":"...","name":"","arguments":"{{}}"}}]}}
+For a tool call, set `arguments` to a JSON-encoded object string, for example
+`{{\"command\":\"pwd\"}}` encoded as a string.
 
 Rules:
 - Use only the tool names listed above.
-- `arguments` must be a JSON object matching that tool's parameters.
+- `arguments` must encode a JSON object matching that tool's parameters.
 - {required}
 - {parallel}
 - Do not wrap the JSON in markdown fences.

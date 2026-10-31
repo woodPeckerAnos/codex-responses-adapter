@@ -47,11 +47,14 @@ def test_tool_prompt_contains_tools_and_rules() -> None:
     assert "Run pwd." in prompt
 
 
-def test_decision_schema_has_tool_enum_and_parallel_limit() -> None:
+def test_decision_schema_has_required_strict_fields_and_parallel_limit() -> None:
     schema = decision_schema(prepared(parallel=False))
-    action = schema["properties"]["actions"]["items"]
-    assert action["properties"]["name"]["enum"] == ["bash", "read_file"]
-    assert schema["properties"]["actions"]["maxItems"] == 1
+    actions = schema["properties"]["actions"]
+    action = actions["items"]
+    assert action["required"] == ["type", "text", "name", "arguments"]
+    assert action["properties"]["arguments"]["type"] == "string"
+    assert action["additionalProperties"] is False
+    assert actions["maxItems"] == 1
 
 
 def test_parse_message_and_tool_call() -> None:
