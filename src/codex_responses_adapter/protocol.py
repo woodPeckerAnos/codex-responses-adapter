@@ -42,6 +42,7 @@ class ResponseBuilder:
         top_p: float,
         max_output_tokens: int | None,
         user: str | None,
+        parallel_tool_calls: bool = True,
     ) -> None:
         self.response_id = response_id
         self.model = model
@@ -54,6 +55,7 @@ class ResponseBuilder:
         self.top_p = top_p
         self.max_output_tokens = max_output_tokens
         self.user = user
+        self.parallel_tool_calls = parallel_tool_calls
 
         self._sequence = 0
         self._output: list[dict[str, Any]] = []
@@ -110,8 +112,7 @@ class ResponseBuilder:
             return []
 
         if isinstance(event, TurnCompletedEvent):
-            self._usage = _usage_payload(event.usage)
-            self._turn_completed = True
+            self.mark_turn_completed(event.usage)
             return []
 
         if isinstance(event, ItemCompletedEvent):
@@ -132,6 +133,77 @@ class ResponseBuilder:
 
         logger.debug("Ignoring unsupported Codex event type=%s", getattr(event, "type", "unknown"))
         return []
+
+    def mark_turn_completed(self, usage: Usage | None) -> None:
+        self._usage = _usage_payload(usage) if usage is not None else None
+        self._turn_completed = True
+
+    def add_text(self, text: str) -> list[SSEEvent]:
+        """Append one assistant message output item."""
+        return self._agent_message_events(text)
+
+    def add_function_call(self, name: str, arguments: str) -> list[SSEEvent]:
+        """Append one function-call output item and its streaming events."""
+        item_id = f"fc_{secrets.token_hex(24)}"
+        call_id = f"call_{secrets.token_hex(16)}"
+        output_index = len(self._output)
+        in_progress_item = _function_call_item(
+            item_id=item_id,
+            call_id=call_id,
+            name=name,
+            arguments="",
+            status="in_progress",
+        )
+        completed_item = _function_call_item(
+            item_id=item_id,
+            call_id=call_id,
+            name=name,
+            arguments=arguments,
+            status="completed",
+        )
+
+        events = [
+            SSEEvent(
+                "response.output_item.added",
+                {
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": in_progress_item,
+                    "sequence_number": self.next_sequence(),
+                },
+            ),
+            SSEEvent(
+                "response.function_call_arguments.delta",
+                {
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "delta": arguments,
+                    "sequence_number": self.next_sequence(),
+                },
+            ),
+            SSEEvent(
+                "response.function_call_arguments.done",
+                {
+                    "type": "response.function_call_arguments.done",
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "arguments": arguments,
+                    "sequence_number": self.next_sequence(),
+                },
+            ),
+            SSEEvent(
+                "response.output_item.done",
+                {
+                    "type": "response.output_item.done",
+                    "output_index": output_index,
+                    "item": completed_item,
+                    "sequence_number": self.next_sequence(),
+                },
+            ),
+        ]
+        self._output.append(completed_item)
+        return events
 
     def build_completed_response(self) -> dict[str, Any]:
         if not self._turn_completed:
@@ -178,7 +250,7 @@ class ResponseBuilder:
             "max_tool_calls": None,
             "model": self.model,
             "output": self._output if completed else [],
-            "parallel_tool_calls": True,
+            "parallel_tool_calls": self.parallel_tool_calls,
             "previous_response_id": self.previous_response_id,
             "prompt_cache_key": None,
             "reasoning": {"effort": None, "summary": None},
@@ -285,6 +357,24 @@ def _message_item(item_id: str, *, status: str, text: str | None) -> dict[str, A
         "status": status,
         "role": "assistant",
         "content": content,
+    }
+
+
+def _function_call_item(
+    *,
+    item_id: str,
+    call_id: str,
+    name: str,
+    arguments: str,
+    status: str,
+) -> dict[str, Any]:
+    return {
+        "id": item_id,
+        "type": "function_call",
+        "status": status,
+        "call_id": call_id,
+        "name": name,
+        "arguments": arguments,
     }
 
 

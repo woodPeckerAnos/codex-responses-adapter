@@ -136,6 +136,15 @@ def codex_timeout(timeout: float) -> AdapterError:
     )
 
 
+def codex_tool_call_invalid(message: str) -> AdapterError:
+    return AdapterError(
+        status_code=502,
+        code="codex_tool_call_invalid",
+        message=message,
+        error_type="server_error",
+    )
+
+
 def codex_protocol_error(message: str) -> AdapterError:
     return AdapterError(
         status_code=502,

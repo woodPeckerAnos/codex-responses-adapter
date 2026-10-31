@@ -5,9 +5,10 @@ on top of the **Codex CLI**, called through the [`acodex`](https://docs.acodex.d
 Python SDK.
 
 It is intended for agent frameworks that can use a Responses-compatible model provider.
-The adapter is text-first and deliberately narrow: it converts text input into a Codex turn
-and text output back into Responses objects and SSE events. Codex's own tool, shell, and
-reasoning events are filtered out.
+Text turns use Codex directly. When the caller supplies function tools, the adapter runs
+Codex in a structured decision mode: Codex returns a JSON choice, and the adapter converts
+it into Responses `message` / `function_call` output so the caller executes the tools. Codex's
+own shell, reasoning, MCP, and web-search events are filtered out.
 
 ```text
 OpenAI SDK / agent framework
@@ -17,6 +18,11 @@ FastAPI adapter (this project)
         │  acodex AsyncCodex / AsyncThread.run_streamed()
         ▼
 codex exec --experimental-json
+
+Tool mode:
+caller tools ──► tool protocol + --output-schema ──► Codex decision JSON
+      ▲                                                   │
+      └──────── Responses function_call / message ◄───────┘
 ```
 
 ## Important: pin acodex 0.117.0
@@ -113,6 +119,38 @@ Example response:
 `status` is `degraded` if the executable cannot be found, but the HTTP server still starts.
 The health endpoint does not verify the Codex login.
 
+## Model discovery
+
+The adapter implements the OpenAI model-list endpoint used by DSH and other gateways:
+
+```bash
+curl -sS http://127.0.0.1:8000/v1/models \
+  -H 'Authorization: Bearer local-codex-key' | jq
+```
+
+It returns one model configured by `CRA_DEFAULT_MODEL`, including the display name and
+context/output metadata used by model pickers:
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "codex-cli",
+      "object": "model",
+      "created": 0,
+      "owned_by": "codex-local",
+      "name": "Codex CLI",
+      "context_window": 128000,
+      "max_output_tokens": 16384
+    }
+  ]
+}
+```
+
+`GET /v1/models/{id}` returns the same object or a 404 `model_not_found` error. If
+`CRA_API_KEY` is set, both endpoints require the same Bearer token as `/v1/responses`.
+
 ## Configuration
 
 All settings use the `CRA_` environment prefix and may be placed in `.env`.
@@ -138,7 +176,13 @@ All settings use the `CRA_` environment prefix and may be placed in `.env`.
 | `CRA_API_KEY` | unset | Optional static Bearer token |
 | `CRA_LOG_REQUESTS` | `true` | Log method, path, status, duration, request ID |
 | `CRA_LOG_PROMPTS` | `false` | Reserved; prompt content is not logged by this adapter |
-| `CRA_DEFAULT_MODEL` | `codex-cli` | Response `model` when the request omits it |
+| `CRA_DEFAULT_MODEL` | `codex-cli` | Model id returned by `/v1/models` and when the request omits `model` |
+| `CRA_MODEL_DISPLAY_NAME` | `Codex CLI` | Display name returned by `/v1/models` |
+| `CRA_MODEL_CONTEXT_WINDOW` | `128000` | Context-window metadata returned by `/v1/models` |
+| `CRA_MODEL_MAX_OUTPUT_TOKENS` | `16384` | Maximum-output metadata returned by `/v1/models` |
+
+The three `CRA_MODEL_*` values only feed model discovery and DSH's context budget. They do
+not change the model Codex actually runs; use `CRA_CODEX_MODEL` for that.
 
 ## Non-streaming request
 
@@ -254,6 +298,20 @@ The `response.output_text.delta` payload contains the complete text of one Codex
 `agent_message`. acodex's Codex event stream reports completed messages rather than
 token-level pieces, so this adapter cannot honestly emit token-by-token deltas.
 
+When the tool bridge returns a function call, the event sequence is:
+
+```text
+event: response.output_item.added         # item.type = function_call
+event: response.function_call_arguments.delta
+event: response.function_call_arguments.done
+event: response.output_item.done
+event: response.completed
+```
+
+The caller executes `name` with `arguments` and sends a `function_call_output` item on the
+next request. Multiple function calls produce multiple output items before
+`response.completed`.
+
 On a failure after streaming has begun, the stream emits:
 
 ```text
@@ -332,9 +390,82 @@ with client.responses.stream(
 
 If `CRA_API_KEY` is set, pass that value as the SDK's `api_key`.
 
+## Using with DeepSeek Harness (DSH)
+
+DSH routes custom providers through `dsh-llm-pi-ai`. Use the **Custom model API** form:
+
+1. Start the adapter with a local key:
+   ```bash
+   CRA_API_KEY=local-codex-key uv run codex-responses-adapter
+   ```
+2. In DSH open **Settings → Models → Add model provider**, switch to **Custom model API**,
+   and fill:
+
+| DSH field | Value |
+|---|---|
+| Provider ID | `codex-local` |
+| Display name | `Codex Local` |
+| API address / Base URL | `http://127.0.0.1:8000/v1` |
+| API protocol | **OpenAI Responses** |
+| API key | `local-codex-key` (same as `CRA_API_KEY`) |
+| Model ID | `codex-cli` |
+| Context window | `128000` (adjust to your real Codex model) |
+| Max output tokens | `16384` (adjust to your real Codex model) |
+| Input types | Text only |
+| Reasoning levels | Do not enable |
+
+The Base URL must end at `/v1`, not `/v1/responses`; the Responses client appends
+`/responses` itself. The model ID only selects the adapter model entry; set
+`CRA_CODEX_MODEL` on the adapter to choose the actual Codex model.
+
+DSH can now use **Get available models**: it calls `GET /v1/models`, which returns the
+configured `codex-cli` entry. You can also add the model ID manually.
+
+Alternatively, the active profile's `cordis.patch.yml` can contain:
+
+```yaml
+- id: llm-pi-ai
+  config:
+    providers:
+      codex-local:
+        displayName: Codex Local
+        apiKeyEnv: CODEX_LOCAL_API_KEY
+        api: openai-responses
+        baseURL: http://127.0.0.1:8000/v1
+        models:
+          - id: codex-cli
+            contextWindow: 128000
+            maxTokens: 16384
+```
+
+`apiKeyEnv` names an environment variable; it is not the key value. Export
+`CODEX_LOCAL_API_KEY=local-codex-key` in the Host environment, or store the key through
+the DSH Models page.
+
+### DSH tool calls
+
+The standard DSH agent sends function tools in each request. The adapter does not expose
+Codex's native shell/MCP tools to DSH. Instead it:
+
+1. Converts the DSH tool schemas and the conversation (including prior
+   `function_call` / `function_call_output` items) into a decision prompt.
+2. Runs Codex with `--output-schema`.
+3. Parses Codex's JSON decision into Responses `message` or `function_call` items.
+4. Lets DSH execute the tool and send the result back on the next turn.
+
+This is a prompt/schema bridge, not a native function-calling passthrough. Codex may still
+run its own read-only inspection tools while deciding; the adapter filters those internal
+events. The bridge validates tool names and argument objects, but does not fully validate
+arguments against each JSON Schema. Image tool outputs (for example a DSH `read_image`
+result) are not supported by this text bridge.
+
+DSH's `standard` preset sends tools; with the bridge enabled no `unsupported_parameter`
+error is returned. A decision that names an unconfigured tool fails with HTTP 502
+`codex_tool_call_invalid`; a malformed decision falls back to a normal text message.
+
 ## Bearer authentication
 
-Set `CRA_API_KEY` to require a static token on `/v1/responses`:
+Set `CRA_API_KEY` to require a static token on `/v1/responses` and `/v1/models`:
 
 ```bash
 export CRA_API_KEY=local-secret
@@ -357,10 +488,15 @@ user database, quota system, or OAuth server.
 ### Supported
 
 - `POST /v1/responses`
+- `GET /v1/models` and `GET /v1/models/{id}`
 - `stream: false` and `stream: true`
 - Text `input` as a string
 - Text message arrays with `user`, `assistant`, `system`, and `developer` roles
+- `function_call` / `function_call_output` history
 - `input_text` / `output_text` content parts
+- Function tools through the structured decision bridge
+- `tool_choice` values `auto`, `none`, and `required`
+- `parallel_tool_calls` limiting the number of returned calls
 - `instructions` as a string (flattened into the Codex prompt; arrays are rejected)
 - `previous_response_id` continuation
 - Optional `store: false`
@@ -372,16 +508,23 @@ user database, quota system, or OAuth server.
 
 ### Not supported
 
-- Function/custom tools and tool-call output. Requests with a non-empty `tools` array are
-  rejected with HTTP 400 instead of silently pretending tools work.
+- Custom/grammar tools and hosted tool types. Only `type: "function"` is supported.
+- Native Codex tool passthrough. Codex's shell/reasoning/MCP/web-search items are internal
+  to the adapter and are not exposed to DSH; DSH executes only the bridged function calls.
+- Full JSON Schema validation of function-call arguments. Names and object shape are
+  checked; the caller's tool runtime remains the authority for argument validation.
+- Image tool outputs. A DSH tool result containing `input_image` / `image_url` is replaced
+  by a text placeholder; the image itself is not sent to Codex.
+- `tool_choice` objects that pin one specific function. String `auto`, `none`, and `required`
+  are supported.
 - `instructions` arrays. The adapter accepts only a string form.
-- Images and files in input. `input_image` / `input_file` parts are rejected.
+- Images and files in model input. `input_image` / `input_file` parts are rejected.
 - Structured output / JSON schema response formats. Only `text.format.type = "text"` is
   accepted.
 - Background responses and conversations.
-- Response retrieval (`GET /v1/responses/{id}`), deletion, cancellation endpoints, and
-  `/v1/models`.
-- Token-level streaming. One Codex `agent_message` becomes one `output_text.delta`.
+- Response retrieval (`GET /v1/responses/{id}`), deletion, and cancellation endpoints.
+- Token-level streaming. One Codex `agent_message` becomes one `output_text.delta`; the tool
+  bridge emits all function-call events after Codex returns its decision.
 - Multiple adapter workers sharing `previous_response_id` state.
 - Passing through Codex reasoning, command execution, file changes, MCP calls, web search
   items, todo lists, or error items as Responses output items.
@@ -391,7 +534,14 @@ user database, quota system, or OAuth server.
 - **`model` is informational.** The request `model` is echoed in the response so SDK
   clients see the model they asked for, but it does not select the Codex model. Set
   `CRA_CODEX_MODEL` (or Codex's own config) to change the actual model. This avoids sending
-  arbitrary OpenAI model IDs to the local Codex CLI.
+  arbitrary OpenAI model IDs to the local Codex CLI. `/v1/models` advertises
+  `CRA_DEFAULT_MODEL` with the `CRA_MODEL_*` metadata.
+- **The tool bridge is decision-mode.** With a non-empty `tools` array, Codex receives the
+  tool schemas and `--output-schema`; it returns a JSON decision, not a native function
+  call. The adapter converts that decision into Responses function-call items. Codex may
+  still run its own read-only inspection tools while deciding, but those are not DSH tools
+  and their output is filtered. Do not treat the bridge as a security boundary: use the
+  Codex sandbox and DSH permissions together.
 - **`instructions` is prompt text.** acodex 0.117 has no separate Responses `instructions`
   parameter, so instructions are prepended inside `<instructions>` tags. Codex therefore
   sees them as part of the prompt, not as a native system/developer message. A resumed
@@ -409,7 +559,8 @@ user database, quota system, or OAuth server.
   depending on its configuration; filtering affects the Responses output, not Codex's
   internal behavior. The default sandbox is `read-only`, approval policy is `never`, and
   web search is disabled. Changing `CRA_CODEX_SANDBOX` to `workspace-write` or
-  `danger-full-access` gives Codex real side effects; do that deliberately.
+  `danger-full-access` gives Codex real side effects; do that deliberately. The tool bridge
+  uses the same Codex thread options.
 - **One worker only.** The concurrency limiter and response mapping are process-local.
   Running multiple Uvicorn workers would create independent maps and independent limits.
 - **No retries.** A failed Codex turn is reported; the adapter does not silently retry and
@@ -443,8 +594,10 @@ Representative status codes:
 | Codex not logged in | 503 | `codex_not_authenticated` |
 | Codex nonzero exit | 502 | `codex_exec_failed` |
 | Codex `turn.failed` / `error` event | 502 | `codex_turn_failed` |
+| Codex returned an unknown/invalid tool call | 502 | `codex_tool_call_invalid` |
 | Turn timeout | 504 | `codex_timeout` |
 | Malformed event / missing `turn.completed` | 502 | `codex_protocol_error` |
+| Unknown model id on `/v1/models/{id}` | 404 | `model_not_found` |
 
 After an SSE stream has started, the equivalent failure is an `error` event and HTTP 200.
 
@@ -461,8 +614,9 @@ uv run pytest -q
 Most tests use an in-memory fake backend. One additional test writes a temporary fake
 `codex` executable and drives it through the real acodex subprocess layer, validating
 `thread.started`, `resume`, and JSONL parsing without needing a Codex login. The suite
-covers request parsing, event mapping, SSE sequence numbers, usage, multi-turn mapping,
-`store=false`, auth, timeout, unsupported input, and error responses.
+covers request parsing, tool schema/decision mapping, function-call SSE events, model
+discovery, usage, multi-turn mapping, `store=false`, auth, timeout, unsupported input, and
+error responses.
 
 Optional lint:
 

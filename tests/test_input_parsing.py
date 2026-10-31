@@ -77,6 +77,94 @@ def test_model_echo_and_store_override() -> None:
     assert prepared.user == "user-1"
 
 
+def test_function_tools_are_parsed() -> None:
+    prepared = ResponsesRequest(
+        input="Use a tool.",
+        tools=[
+            {
+                "type": "function",
+                "name": "bash",
+                "description": "Run a command.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            }
+        ],
+        tool_choice="auto",
+        parallel_tool_calls=False,
+    ).prepare(make_settings())
+    assert prepared.tool_choice == "auto"
+    assert prepared.parallel_tool_calls is False
+    assert len(prepared.tools) == 1
+    assert prepared.tools[0].name == "bash"
+    assert prepared.tools[0].parameters["required"] == ["command"]
+
+
+def test_invalid_tool_choice_is_rejected() -> None:
+    with pytest.raises(AdapterError) as exc_info:
+        ResponsesRequest(
+            input="hi",
+            tools=[{"type": "function", "name": "bash"}],
+            tool_choice={"type": "function", "name": "bash"},
+        ).prepare(make_settings())
+    assert exc_info.value.code == "unsupported_parameter"
+
+
+def test_tool_choice_none_drops_tools() -> None:
+    prepared = ResponsesRequest(
+        input="Just answer.",
+        tool_choice="none",
+        tools=[{"type": "function", "name": "bash", "parameters": {"type": "object"}}],
+    ).prepare(make_settings())
+    assert prepared.tools == ()
+
+
+def test_function_call_history_is_rendered() -> None:
+    prepared = ResponsesRequest(
+        input=[
+            {"role": "user", "content": "List files."},
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "bash",
+                "arguments": '{"command":"ls"}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "README.md",
+            },
+        ],
+    ).prepare(make_settings())
+    assert '<tool_call name="bash" call_id="call_1">' in prepared.prompt
+    assert '{"command":"ls"}' in prepared.prompt
+    assert '<tool_result call_id="call_1">' in prepared.prompt
+    assert "README.md" in prepared.prompt
+
+
+def test_image_tool_output_is_replaced_with_placeholder() -> None:
+    prepared = ResponsesRequest(
+        input=[
+            {"role": "user", "content": "Read the image."},
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": [
+                    {"type": "input_text", "text": "image metadata"},
+                    {
+                        "type": "input_image",
+                        "image_url": "data:image/png;base64,AAAA",
+                    },
+                ],
+            },
+        ],
+    ).prepare(make_settings())
+    assert "image metadata" in prepared.prompt
+    assert "[image tool output omitted: text-only adapter]" in prepared.prompt
+
+
 def test_blank_previous_response_id_is_none() -> None:
     prepared = ResponsesRequest(input="hi", previous_response_id="  ").prepare(make_settings())
     assert prepared.previous_response_id is None
@@ -91,10 +179,6 @@ def test_blank_previous_response_id_is_none() -> None:
         ),
         (
             {"input": [{"role": "user", "content": [{"type": "input_file"}]}]},
-            "unsupported_parameter",
-        ),
-        (
-            {"input": "hi", "tools": [{"type": "function", "name": "x"}]},
             "unsupported_parameter",
         ),
         (

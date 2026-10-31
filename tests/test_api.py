@@ -129,15 +129,8 @@ def test_bearer_auth() -> None:
     assert health.json()["auth_required"] is True
 
 
-def test_tools_and_images_are_rejected() -> None:
+def test_images_are_rejected() -> None:
     client, _ = client_for()
-    tools = client.post(
-        "/v1/responses",
-        json={"input": "Hello", "tools": [{"type": "function", "name": "x"}]},
-    )
-    assert tools.status_code == 400
-    assert tools.json()["error"]["code"] == "unsupported_parameter"
-
     image = client.post(
         "/v1/responses",
         json={
@@ -151,6 +144,115 @@ def test_tools_and_images_are_rejected() -> None:
     )
     assert image.status_code == 400
     assert image.json()["error"]["code"] == "unsupported_parameter"
+
+
+
+
+TOOL = {
+    "type": "function",
+    "name": "bash",
+    "description": "Run a shell command.",
+    "parameters": {
+        "type": "object",
+        "properties": {"command": {"type": "string"}},
+        "required": ["command"],
+    },
+}
+
+
+def test_tool_call_bridge_non_streaming() -> None:
+    decision = '{"actions":[{"type":"tool_call","name":"bash","arguments":{"command":"pwd"}}]}'
+    client, backend = client_for(FakeBackend(make_events(decision)))
+    response = client.post(
+        "/v1/responses",
+        json={"input": "Where am I?", "tools": [TOOL], "tool_choice": "auto"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    item = body["output"][0]
+    assert item["type"] == "function_call"
+    assert item["name"] == "bash"
+    assert item["arguments"] == '{"command":"pwd"}'
+    assert item["call_id"].startswith("call_")
+    assert item["status"] == "completed"
+    assert backend.calls[0]["output_schema"] is not None
+    assert "Available tools" in backend.calls[0]["prompt"]
+
+
+def test_tool_call_bridge_streaming_events() -> None:
+    decision = '{"actions":[{"type":"tool_call","name":"bash","arguments":{"command":"pwd"}}]}'
+    client, _ = client_for(FakeBackend(make_events(decision)))
+    with client.stream(
+        "POST",
+        "/v1/responses",
+        json={"input": "Where am I?", "tools": [TOOL], "stream": True},
+    ) as response:
+        assert response.status_code == 200
+        body = "".join(response.iter_text())
+
+    events = parse_sse(body)
+    assert [event["type"] for event in events] == [
+        "response.created",
+        "response.in_progress",
+        "response.output_item.added",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+        "response.output_item.done",
+        "response.completed",
+    ]
+    assert events[2]["item"]["type"] == "function_call"
+    assert events[3]["delta"] == '{"command":"pwd"}'
+    assert events[4]["arguments"] == '{"command":"pwd"}'
+    assert events[-1]["response"]["output"][0]["type"] == "function_call"
+
+
+def test_tool_bridge_can_return_a_message() -> None:
+    decision = '{"actions":[{"type":"message","text":"No tool needed."}]}'
+    client, _ = client_for(FakeBackend(make_events(decision)))
+    response = client.post(
+        "/v1/responses",
+        json={"input": "Hello", "tools": [TOOL]},
+    )
+    assert response.status_code == 200
+    assert response.json()["output"][0]["content"][0]["text"] == "No tool needed."
+
+
+def test_tool_bridge_rejects_unknown_tool_name() -> None:
+    decision = '{"actions":[{"type":"tool_call","name":"nope","arguments":{}}]}'
+    client, _ = client_for(FakeBackend(make_events(decision)))
+    response = client.post(
+        "/v1/responses",
+        json={"input": "Hello", "tools": [TOOL]},
+    )
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "codex_tool_call_invalid"
+
+
+def test_models_endpoint() -> None:
+    client, _ = client_for(default_model="codex-cli", model_display_name="Local Codex")
+    response = client.get("/v1/models")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["object"] == "list"
+    assert body["data"][0]["id"] == "codex-cli"
+    assert body["data"][0]["name"] == "Local Codex"
+    assert body["data"][0]["context_window"] == 128000
+    assert body["data"][0]["max_output_tokens"] == 16384
+
+
+def test_models_endpoint_unknown_id_returns_404() -> None:
+    client, _ = client_for()
+    response = client.get("/v1/models/not-configured")
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "model_not_found"
+
+
+def test_models_endpoint_requires_auth_when_configured() -> None:
+    client, _ = client_for(api_key="secret")
+    unauthorized = client.get("/v1/models")
+    assert unauthorized.status_code == 401
+    authorized = client.get("/v1/models", headers={"Authorization": "Bearer secret"})
+    assert authorized.status_code == 200
 
 
 def test_timeout_non_streaming() -> None:

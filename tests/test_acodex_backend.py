@@ -28,6 +28,11 @@ args = sys.argv[1:]
 thread_id = "thread-new"
 if "resume" in args:
     thread_id = args[args.index("resume") + 1]
+text = (
+    json.dumps({"actions": [{"type": "message", "text": "schema decision"}]})
+    if "--output-schema" in args
+    else f"backend {thread_id}"
+)
 
 print(json.dumps({"type": "thread.started", "thread_id": thread_id}))
 print(json.dumps({"type": "turn.started"}))
@@ -36,7 +41,7 @@ print(json.dumps({
     "item": {
         "id": "item_1",
         "type": "agent_message",
-        "text": f"backend {thread_id}",
+        "text": text,
     },
 }))
 print(json.dumps({
@@ -88,6 +93,29 @@ def test_acodex_backend_new_and_resumed_thread(tmp_path: Path) -> None:
         assert isinstance(second_events[2], ItemCompletedEvent)
         assert isinstance(second_events[2].item, AgentMessageItem)
         assert second_events[2].item.text == "backend thread-existing"
+
+    asyncio.run(scenario())
+
+
+def test_acodex_backend_passes_output_schema(tmp_path: Path) -> None:
+    script = _write_fake_codex(tmp_path)
+    backend = AcodexBackend(make_settings(codex_path=str(script)))
+
+    async def scenario() -> None:
+        signal = asyncio.Event()
+        stream = await backend.stream_turn(
+            prompt="choose",
+            thread_id=None,
+            signal=signal,
+            output_schema={"type": "object"},
+        )
+        events = [event async for event in stream.events]
+        await stream.aclose()
+        assert isinstance(events[1], TurnStartedEvent)
+        assert isinstance(events[2].item, AgentMessageItem)
+        assert events[2].item.text == (
+            '{"actions": [{"type": "message", "text": "schema decision"}]}'
+        )
 
     asyncio.run(scenario())
 

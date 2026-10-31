@@ -11,10 +11,26 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import __version__
-from .errors import authentication_error
+from .errors import AdapterError, authentication_error
 from .schemas import ResponsesRequest
+from .settings import Settings
 
 router = APIRouter()
+
+
+def _model_payload(settings: Settings) -> dict[str, object]:
+    return {
+        "id": settings.default_model,
+        "object": "model",
+        "created": 0,
+        "owned_by": "codex-local",
+        "name": settings.model_display_name,
+        "context_window": settings.model_context_window,
+        "max_output_tokens": settings.model_max_output_tokens,
+        "contextWindow": settings.model_context_window,
+        "maxTokens": settings.model_max_output_tokens,
+    }
+
 
 _SSE_HEADERS = {
     "Cache-Control": "no-cache",
@@ -64,6 +80,33 @@ async def create_response(
     except BaseException:
         context.release()
         raise
+
+
+@router.get("/v1/models")
+async def list_models(
+    request: Request,
+    _: None = Depends(check_auth),
+) -> dict[str, object]:
+    settings = request.app.state.settings
+    model = _model_payload(settings)
+    return {"object": "list", "data": [model]}
+
+
+@router.get("/v1/models/{model_id}")
+async def get_model(
+    model_id: str,
+    request: Request,
+    _: None = Depends(check_auth),
+) -> dict[str, object]:
+    settings = request.app.state.settings
+    if model_id != settings.default_model:
+        raise AdapterError(
+            status_code=404,
+            code="model_not_found",
+            message=f"Model '{model_id}' was not found.",
+            error_type="invalid_request_error",
+        )
+    return _model_payload(settings)
 
 
 @router.get("/health")

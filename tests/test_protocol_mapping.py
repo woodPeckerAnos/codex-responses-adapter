@@ -84,6 +84,31 @@ def test_agent_message_maps_to_delta_and_item_lifecycle() -> None:
     assert completed.data["sequence_number"] == 9
 
 
+def test_function_call_maps_to_arguments_events() -> None:
+    builder = make_builder()
+    builder.started_events()
+    builder.handle(ThreadStartedEvent(thread_id="thread-123"))
+    events = builder.add_function_call("bash", '{"command":"pwd"}')
+    assert [event.event for event in events] == [
+        "response.output_item.added",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+        "response.output_item.done",
+    ]
+    assert [event.data["sequence_number"] for event in events] == [3, 4, 5, 6]
+    assert events[0].data["item"]["type"] == "function_call"
+    assert events[0].data["item"]["name"] == "bash"
+    assert events[0].data["item"]["arguments"] == ""
+    assert events[1].data["delta"] == '{"command":"pwd"}'
+    assert events[3].data["item"]["arguments"] == '{"command":"pwd"}'
+
+    builder.mark_turn_completed(Usage(2, 0, 1))
+    response = builder.build_completed_response()
+    assert response["output"][0]["type"] == "function_call"
+    assert response["output"][0]["call_id"].startswith("call_")
+    assert response["output"][0]["id"].startswith("fc_")
+
+
 def test_non_text_items_are_filtered() -> None:
     builder = make_builder()
     builder.started_events()

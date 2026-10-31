@@ -11,10 +11,20 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from acodex.exceptions import CodexCancelledError, CodexError
+from acodex.types.events import (
+    ItemCompletedEvent,
+    ThreadErrorEvent,
+    ThreadStartedEvent,
+    TurnCompletedEvent,
+    TurnFailedEvent,
+    Usage,
+)
+from acodex.types.items import AgentMessageItem
 
 from .backend import CodexBackend, translate_codex_error
 from .errors import (
     AdapterError,
+    codex_protocol_error,
     codex_timeout,
     codex_turn_failed,
     concurrency_limit_exceeded,
@@ -26,6 +36,7 @@ from .protocol import ResponseBuilder
 from .schemas import PreparedRequest
 from .settings import Settings
 from .store import ResponseStore
+from .tool_bridge import build_tool_prompt, decision_schema, parse_decision
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +65,15 @@ class ConcurrencyLimiter:
 
     def release(self) -> None:
         self._semaphore.release()
+
+
+@dataclass(frozen=True, slots=True)
+class CollectedTurn:
+    """The parts of a Codex turn needed by the tool bridge."""
+
+    thread_id: str | None
+    final_text: str
+    usage: Usage | None
 
 
 @dataclass
@@ -127,17 +147,20 @@ class ResponsesService:
         builder = self._builder(context)
         turn = None
         try:
-            turn = await self._backend.stream_turn(
-                prompt=context.prepared.prompt,
-                thread_id=context.thread_id,
-                signal=context.signal,
-            )
-            try:
-                async for event in self._iter_events(turn, context):
-                    builder.handle(event)
-            finally:
-                await _close_quietly(turn)
-                turn = None
+            if context.prepared.tools:
+                await self._populate_tool_builder(context, builder)
+            else:
+                turn = await self._backend.stream_turn(
+                    prompt=context.prepared.prompt,
+                    thread_id=context.thread_id,
+                    signal=context.signal,
+                )
+                try:
+                    async for event in self._iter_events(turn, context):
+                        builder.handle(event)
+                finally:
+                    await _close_quietly(turn)
+                    turn = None
 
             response = builder.build_completed_response()
             self._remember(context, builder)
@@ -163,18 +186,23 @@ class ResponsesService:
             for event in builder.started_events():
                 yield event.encode()
 
-            turn = await self._backend.stream_turn(
-                prompt=context.prepared.prompt,
-                thread_id=context.thread_id,
-                signal=context.signal,
-            )
-            try:
-                async for event in self._iter_events(turn, context):
-                    for outbound in builder.handle(event):
-                        yield outbound.encode()
-            finally:
-                await _close_quietly(turn)
-                turn = None
+            if context.prepared.tools:
+                tool_events = await self._populate_tool_builder(context, builder)
+                for outbound in tool_events:
+                    yield outbound.encode()
+            else:
+                turn = await self._backend.stream_turn(
+                    prompt=context.prepared.prompt,
+                    thread_id=context.thread_id,
+                    signal=context.signal,
+                )
+                try:
+                    async for event in self._iter_events(turn, context):
+                        for outbound in builder.handle(event):
+                            yield outbound.encode()
+                finally:
+                    await _close_quietly(turn)
+                    turn = None
 
             response = builder.build_completed_response()
             self._remember(context, builder)
@@ -200,6 +228,80 @@ class ResponsesService:
                 await _close_quietly(turn)
             context.release()
 
+    async def _populate_tool_builder(
+        self,
+        context: TurnContext,
+        builder: ResponseBuilder,
+    ) -> list:
+        """Run Codex in decision mode and turn its JSON into output items."""
+        prepared = context.prepared
+        collected = await self._collect_turn(
+            context,
+            prompt=build_tool_prompt(prepared),
+            output_schema=decision_schema(prepared),
+        )
+        thread_id = collected.thread_id or context.thread_id
+        if thread_id is None:
+            raise codex_turn_failed(
+                "Codex did not report a thread ID; the session cannot be resumed."
+            )
+        if not collected.final_text.strip():
+            raise codex_protocol_error("Codex returned no final decision text.")
+
+        builder.handle(ThreadStartedEvent(thread_id=thread_id))
+        builder.mark_turn_completed(collected.usage)
+        outbound: list = []
+        for action in parse_decision(collected.final_text, prepared):
+            if action.kind == "message":
+                outbound.extend(builder.add_text(action.text))
+            else:
+                outbound.extend(builder.add_function_call(action.name, action.arguments))
+        return outbound
+
+    async def _collect_turn(
+        self,
+        context: TurnContext,
+        *,
+        prompt: str,
+        output_schema: dict[str, Any],
+    ) -> CollectedTurn:
+        turn = await self._backend.stream_turn(
+            prompt=prompt,
+            thread_id=context.thread_id,
+            signal=context.signal,
+            output_schema=output_schema,
+        )
+        thread_id = context.thread_id
+        texts: list[str] = []
+        usage: Usage | None = None
+        completed = False
+        try:
+            async for event in self._iter_events(turn, context):
+                if isinstance(event, ThreadStartedEvent):
+                    thread_id = event.thread_id
+                elif isinstance(event, ItemCompletedEvent) and isinstance(
+                    event.item,
+                    AgentMessageItem,
+                ):
+                    texts.append(event.item.text)
+                elif isinstance(event, TurnCompletedEvent):
+                    usage = event.usage
+                    completed = True
+                elif isinstance(event, TurnFailedEvent):
+                    raise codex_turn_failed(event.error.message)
+                elif isinstance(event, ThreadErrorEvent):
+                    raise codex_turn_failed(event.message)
+        finally:
+            await _close_quietly(turn)
+
+        if not completed:
+            raise codex_protocol_error(
+                "Codex event stream ended without a turn.completed event; "
+                "the turn may have been interrupted."
+            )
+        final_text = next((text for text in reversed(texts) if text.strip()), "")
+        return CollectedTurn(thread_id=thread_id, final_text=final_text, usage=usage)
+
     def _builder(self, context: TurnContext) -> ResponseBuilder:
         return ResponseBuilder(
             response_id=context.response_id,
@@ -213,6 +315,7 @@ class ResponsesService:
             top_p=context.prepared.top_p,
             max_output_tokens=context.prepared.max_output_tokens,
             user=context.prepared.user,
+            parallel_tool_calls=context.prepared.parallel_tool_calls,
         )
 
     async def _iter_events(

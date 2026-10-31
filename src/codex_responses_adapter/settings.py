@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     log_requests: bool = True
     log_prompts: bool = False
     default_model: str = "codex-cli"
+    model_display_name: str = "Codex CLI"
+    model_context_window: int = Field(default=128_000, ge=1)
+    model_max_output_tokens: int = Field(default=16_384, ge=1)
 
     @field_validator("codex_path", "codex_model", mode="before")
     @classmethod

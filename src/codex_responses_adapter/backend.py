@@ -43,6 +43,7 @@ class CodexBackend(Protocol):
         prompt: str,
         thread_id: str | None,
         signal: asyncio.Event,
+        output_schema: dict[str, Any] | None = None,
     ) -> TurnStream: ...
 
 
@@ -80,6 +81,7 @@ class AcodexBackend:
         prompt: str,
         thread_id: str | None,
         signal: asyncio.Event,
+        output_schema: dict[str, Any] | None = None,
     ) -> TurnStream:
         try:
             client = self._get_client()
@@ -88,7 +90,10 @@ class AcodexBackend:
                 thread = client.start_thread(**thread_options)
             else:
                 thread = client.resume_thread(thread_id, **thread_options)
-            streamed = await thread.run_streamed(prompt, signal=signal)
+            turn_options: dict[str, Any] = {"signal": signal}
+            if output_schema is not None:
+                turn_options["output_schema"] = output_schema
+            streamed = await thread.run_streamed(prompt, **turn_options)
         except CodexError as exc:
             raise translate_codex_error(exc) from exc
         except OSError as exc:

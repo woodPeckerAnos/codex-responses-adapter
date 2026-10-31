@@ -68,8 +68,15 @@ class FakeBackend:
         prompt: str,
         thread_id: str | None,
         signal: asyncio.Event,
+        output_schema: dict[str, Any] | None = None,
     ) -> TurnStream:
-        self.calls.append({"prompt": prompt, "thread_id": thread_id})
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "thread_id": thread_id,
+                "output_schema": output_schema,
+            }
+        )
         if self.error is not None:
             raise self.error
 
