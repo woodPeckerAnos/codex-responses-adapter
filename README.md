@@ -46,7 +46,8 @@ uses.
 - Python 3.11 or newer. The repository uses [`uv`](https://docs.astral.sh/uv/) for
   reproducible environments.
 - The Codex CLI installed and available as `codex` on `PATH` (or configured through
-  `CRA_CODEX_PATH`).
+  `CRA_CODEX_PATH`). **Codex 0.166.0 or newer is required for `gpt-6.1-sol` and
+  `gpt-6.1-terra`.** Codex 0.155.1 rejects those model IDs.
 - A Codex login (`codex login`). The adapter starts `codex exec` per turn; you do **not**
   need to keep an interactive Codex session running.
 - No OpenAI API key is needed by the adapter itself. Codex uses its own configured
@@ -73,12 +74,43 @@ If `codex login status` is not authenticated, run:
 codex login
 ```
 
+### Local Codex 0.166+ install without sudo
+
+The global npm prefix `/usr/local` is often root-owned. This project can install the
+latest Codex CLI into its own `.tools/` directory instead:
+
+```bash
+cd codex-responses-adapter
+./scripts/install-codex-local.sh
+export PATH="$PWD/.tools/node_modules/.bin:$PATH"
+codex --version       # expect 0.166.0 or newer
+```
+
+`scripts/run-local.sh` also sets `CRA_CODEX_PATH` to this local binary automatically.
+The old global `/usr/local/bin/codex` is not modified. If you prefer a global upgrade,
+run the npm command with the permissions required by your npm prefix.
+
+Verified with Codex `0.166.0`: `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-astra`, and
+`gpt-6-sol` are accepted by the current ChatGPT account. Codex `0.155.1` does not know
+the 6.1 model IDs.
+
 ## Install and start
 
 ```bash
 cd codex-responses-adapter
 uv sync --dev
-uv run codex-responses-adapter
+CRA_API_KEY=local-codex-key \
+CRA_CODEX_MODEL=gpt-6.1-sol \
+CRA_DEFAULT_MODEL=gpt-6.1-sol \
+CRA_MODEL_CONTEXT_WINDOW=500000 \
+CRA_MODEL_MAX_OUTPUT_TOKENS=32768 \
+./scripts/run-local.sh
+```
+
+Or, if the `codex` on `PATH` is already 0.166+:
+
+```bash
+CRA_API_KEY=local-codex-key CRA_CODEX_MODEL=gpt-6.1-sol uv run codex-responses-adapter
 ```
 
 The default bind address is `127.0.0.1:8000`. Equivalent Uvicorn command:
@@ -394,9 +426,14 @@ If `CRA_API_KEY` is set, pass that value as the SDK's `api_key`.
 
 DSH routes custom providers through `dsh-llm-pi-ai`. Use the **Custom model API** form:
 
-1. Start the adapter with a local key:
+1. Start the adapter with a local key and the upgraded local Codex:
    ```bash
-   CRA_API_KEY=local-codex-key uv run codex-responses-adapter
+   CRA_API_KEY=local-codex-key \
+   CRA_CODEX_MODEL=gpt-6.1-sol \
+   CRA_DEFAULT_MODEL=gpt-6.1-sol \
+   CRA_MODEL_CONTEXT_WINDOW=500000 \
+   CRA_MODEL_MAX_OUTPUT_TOKENS=32768 \
+   ./scripts/run-local.sh
    ```
 2. In DSH open **Settings → Models → Add model provider**, switch to **Custom model API**,
    and fill:
@@ -408,9 +445,9 @@ DSH routes custom providers through `dsh-llm-pi-ai`. Use the **Custom model API*
 | API address / Base URL | `http://127.0.0.1:8000/v1` |
 | API protocol | **OpenAI Responses** |
 | API key | `local-codex-key` (same as `CRA_API_KEY`) |
-| Model ID | `codex-cli` |
-| Context window | `128000` (adjust to your real Codex model) |
-| Max output tokens | `16384` (adjust to your real Codex model) |
+| Model ID | `gpt-6.1-sol` (or `gpt-6-astra`) |
+| Context window | `500000` for `gpt-6.1-sol`; `272000` for `gpt-6-astra` |
+| Max output tokens | `32768` (adjust to your needs) |
 | Input types | Text only |
 | Reasoning levels | Do not enable |
 
@@ -419,7 +456,8 @@ The Base URL must end at `/v1`, not `/v1/responses`; the Responses client append
 `CRA_CODEX_MODEL` on the adapter to choose the actual Codex model.
 
 DSH can now use **Get available models**: it calls `GET /v1/models`, which returns the
-configured `codex-cli` entry. You can also add the model ID manually.
+configured `CRA_DEFAULT_MODEL` entry (`gpt-6.1-sol` in this example). You can also add the
+model ID manually.
 
 Alternatively, the active profile's `cordis.patch.yml` can contain:
 
@@ -433,9 +471,9 @@ Alternatively, the active profile's `cordis.patch.yml` can contain:
         api: openai-responses
         baseURL: http://127.0.0.1:8000/v1
         models:
-          - id: codex-cli
-            contextWindow: 128000
-            maxTokens: 16384
+          - id: gpt-6.1-sol
+            contextWindow: 500000
+            maxTokens: 32768
 ```
 
 `apiKeyEnv` names an environment variable; it is not the key value. Export
